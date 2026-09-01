@@ -455,6 +455,8 @@ def build_parser() -> argparse.ArgumentParser:
     preview_cmd.add_argument("id")
     sub.add_parser("auth-status")
     sub.add_parser("auth-clear")
+    login_cmd = sub.add_parser("login")
+    login_cmd.add_argument("--poll", action="store_true")
     export_cmd = sub.add_parser("export")
     export_cmd.add_argument("--project", default="")
     export_cmd.add_argument("--since", default="")
@@ -486,6 +488,8 @@ def main(argv: list[str] | None = None) -> int:
             return emit(chatgpt_live.auth_status())
         if args.command == "auth-clear":
             return emit(chatgpt_live.clear_token())
+        if args.command == "login":
+            return emit(chatgpt_live.login_poll() if args.poll else chatgpt_live.login_start())
         if args.command == "projects":
             return emit(chatgpt_live.list_projects())
         if args.command == "export":

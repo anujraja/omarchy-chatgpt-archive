@@ -15,7 +15,8 @@ Item {
   property bool busy: false
   property bool exportOpen: false
   property bool authenticated: false
-  property string statusText: "Import a ZIP or export from ChatGPT."
+  property bool waitingLogin: false
+  property string statusText: "Log in to ChatGPT to export from the bar."
   property string filterText: ""
   property string projectId: ""
   property string datePreset: "all"
@@ -33,6 +34,7 @@ Item {
   property int progressDone: 0
   property int progressTotal: 0
   property string tokenDraft: ""
+  readonly property bool showLogin: !authenticated
 
   readonly property string pluginId: (manifest && manifest.id) ? String(manifest.id) : "io.github.anujraja.chatgpt-archive"
   readonly property string home: Quickshell.env("HOME")
@@ -118,7 +120,8 @@ Item {
     root.exportOpen = !!(payload && payload.export)
     root.refresh()
     root.loadProjects()
-    Qt.callLater(function() { searchField.forceActiveFocus() })
+    if (payload && payload.export && !root.authenticated) root.startLogin()
+    Qt.callLater(function() { if (searchField) searchField.forceActiveFocus() })
   }
 
   function close() { root.opened = false }
@@ -208,25 +211,33 @@ Item {
     Quickshell.execDetached(["bash", "-lc", "mkdir -p " + JSON.stringify(root.archiveDir) + " && xdg-open " + JSON.stringify(root.archiveDir)])
   }
 
-  function saveToken() {
-    var token = String(root.tokenDraft || "").trim()
-    if (!token) {
-      root.statusText = "Paste the accessToken first."
+  function startLogin() {
+    root.waitingLogin = true
+    root.statusText = "ChatGPT is opening in the browser. Sign in there — this window will pick up the session."
+    loginStartProc.running = false
+    loginStartProc.running = true
+    loginPollTimer.start()
+  }
+
+  function applyLogin(payload) {
+    if (payload && payload.authenticated) {
+      root.authenticated = true
+      root.waitingLogin = false
+      loginPollTimer.stop()
+      root.statusText = "Signed in. Choose a project and date range, then export."
+      root.loadProjects()
+      root.refresh()
       return
     }
-    tokenFile.setText("CHATGPT_TOKEN=" + token + "\n")
-    root.tokenDraft = ""
-    root.statusText = "Session saved on this machine. Token is not shown again."
-    authProc.running = false
-    authProc.running = true
-    root.loadProjects()
+    root.waitingLogin = !!(payload && payload.waiting)
+    if (root.waitingLogin)
+      root.statusText = "Waiting for ChatGPT login in the browser…"
   }
 
   function startExport() {
     if (root.busy) return
     if (!root.authenticated) {
-      root.exportOpen = true
-      root.statusText = "Save a ChatGPT session token to export from the bar."
+      root.startLogin()
       return
     }
     root.busy = true
@@ -291,6 +302,37 @@ Item {
     onExited: {
       var payload = root.parseJson(authOut.text, {})
       root.authenticated = !!payload.authenticated
+      if (root.authenticated) root.waitingLogin = false
+    }
+  }
+
+  Process {
+    id: loginStartProc
+    running: false
+    command: ["python3", root.pluginFile("archive.py"), "login"]
+    stdout: StdioCollector { id: loginStartOut; waitForEnd: true }
+    onExited: root.applyLogin(root.parseJson(loginStartOut.text, {}))
+  }
+
+  Process {
+    id: loginPollProc
+    running: false
+    command: ["python3", root.pluginFile("archive.py"), "login", "--poll"]
+    stdout: StdioCollector { id: loginPollOut; waitForEnd: true }
+    onExited: root.applyLogin(root.parseJson(loginPollOut.text, {}))
+  }
+
+  Timer {
+    id: loginPollTimer
+    interval: 2000
+    repeat: true
+    onTriggered: {
+      if (root.authenticated) {
+        stop()
+        return
+      }
+      loginPollProc.running = false
+      loginPollProc.running = true
     }
   }
 
@@ -407,7 +449,7 @@ Item {
               font.bold: true
             }
             Text {
-              text: root.authenticated ? "Session ready · export from the bar" : "Local archive · add a session to export live"
+              text: root.authenticated ? "Session ready · export from the bar" : "Log in to ChatGPT in the browser. We'll fetch the session automatically."
               color: root.muted
               font.family: Style.font.menuFamily
               font.pixelSize: Style.font.caption
@@ -415,11 +457,14 @@ Item {
           }
 
           Button {
-            text: root.busy ? "Working…" : "Export"
+            text: root.authenticated ? (root.busy ? "Working…" : "Export") : (root.waitingLogin ? "Waiting…" : "Log in")
             active: true
             foreground: root.foreground
             accent: Color.accent
-            onClicked: root.exportOpen = true
+            onClicked: {
+              if (root.authenticated) root.exportOpen = true
+              else root.startLogin()
+            }
           }
           Button {
             text: "Import ZIP"
@@ -435,7 +480,63 @@ Item {
           }
         }
 
+        Item {
+          visible: root.showLogin
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+
+          Column {
+            anchors.centerIn: parent
+            width: Math.min(parent.width - Style.space(40), Style.space(420))
+            spacing: Style.spacing.md
+
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: "󰌆"
+              color: Color.accent
+              font.pixelSize: Style.font.display
+              font.family: Style.font.family
+            }
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: "Log in to ChatGPT"
+              color: root.foreground
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              horizontalAlignment: Text.AlignHCenter
+              text: root.waitingLogin
+                ? "Sign in in the ChatGPT window. This app will catch the session in the background."
+                : "Opens ChatGPT in a browser window. After you sign in, export projects and date ranges from the bar."
+              color: root.muted
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.body
+            }
+            Button {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: root.waitingLogin ? "Waiting for login…" : "Log in to ChatGPT"
+              active: true
+              foreground: root.foreground
+              accent: Color.accent
+              onClicked: root.startLogin()
+            }
+            Button {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: "Import a ZIP instead"
+              bordered: true
+              foreground: root.foreground
+              onClicked: root.pickExportZip()
+            }
+          }
+        }
+
         RowLayout {
+          visible: !root.showLogin
           Layout.fillWidth: true
           spacing: Style.spacing.sm
 
@@ -490,7 +591,7 @@ Item {
         }
 
         RowLayout {
-          visible: root.datePreset === "custom"
+          visible: !root.showLogin && root.datePreset === "custom"
           Layout.fillWidth: true
           spacing: Style.spacing.sm
           TextField {
@@ -510,6 +611,7 @@ Item {
         }
 
         RowLayout {
+          visible: !root.showLogin
           Layout.fillWidth: true
           Layout.fillHeight: true
           spacing: Style.spacing.md
@@ -675,29 +777,21 @@ Item {
             Text {
               width: parent.width
               wrapMode: Text.Wrap
-              text: "Uses your browser session. Open chatgpt.com/api/auth/session, copy accessToken, and save it here once. It stays in ~/.config/chatgpt-archive/config.env."
+              text: root.authenticated
+                ? "Export matching conversations into the local Markdown archive."
+                : "Log in first. ChatGPT opens in the browser and this app fetches the session in the background."
               color: root.muted
               font.pixelSize: Style.font.caption
               font.family: Style.font.menuFamily
             }
 
-            TextField {
-              width: parent.width
-              visible: !root.authenticated
-              password: true
-              placeholderText: "Paste accessToken"
-              text: root.tokenDraft
-              foreground: root.foreground
-              accent: Color.accent
-              onTextChanged: root.tokenDraft = text
-            }
             Button {
               visible: !root.authenticated
-              text: "Save session"
+              text: root.waitingLogin ? "Waiting for login…" : "Log in to ChatGPT"
               active: true
               foreground: root.foreground
               accent: Color.accent
-              onClicked: root.saveToken()
+              onClicked: root.startLogin()
             }
 
             Dropdown {

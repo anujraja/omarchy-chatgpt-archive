@@ -6,8 +6,13 @@ printed, never accepted as a CLI flag, and never written into the archive.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
+import shutil
+import socket
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -20,6 +25,8 @@ BASE_URL = "https://chatgpt.com"
 CONFIG_DIR = Path.home() / ".config" / "chatgpt-archive"
 CONFIG_FILE = CONFIG_DIR / "config.env"
 DEVICE_FILE = CONFIG_DIR / "device_id"
+BROWSER_PROFILE = Path.home() / ".local" / "share" / "chatgpt-archive" / "browser"
+DEBUG_PORT = 9229
 
 
 class LiveError(Exception):
@@ -71,7 +78,172 @@ def auth_status() -> dict:
         "ok": True,
         "authenticated": bool(token),
         "config": str(CONFIG_FILE),
+        "waiting": debugging_up() and not bool(token),
     }
+
+
+def debugging_up() -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{DEBUG_PORT}/json/version", timeout=0.4) as response:
+            return response.status == 200
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+def _recvn(sock: socket.socket, count: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < count:
+        piece = sock.recv(count - len(chunks))
+        if not piece:
+            raise LiveError("browser closed the debug connection")
+        chunks.extend(piece)
+    return bytes(chunks)
+
+
+def _ws_send(sock: socket.socket, payload: bytes) -> None:
+    mask = os.urandom(4)
+    header = bytearray([0x81])
+    length = len(payload)
+    if length < 126:
+        header.append(0x80 | length)
+    elif length < 65536:
+        header.append(0x80 | 126)
+        header.extend(length.to_bytes(2, "big"))
+    else:
+        header.append(0x80 | 127)
+        header.extend(length.to_bytes(8, "big"))
+    header.extend(mask)
+    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    sock.sendall(header + masked)
+
+
+def _ws_recv(sock: socket.socket) -> bytes:
+    header = _recvn(sock, 2)
+    length = header[1] & 0x7F
+    if length == 126:
+        length = int.from_bytes(_recvn(sock, 2), "big")
+    elif length == 127:
+        length = int.from_bytes(_recvn(sock, 8), "big")
+    if header[1] & 0x80:
+        _recvn(sock, 4)
+    return _recvn(sock, length)
+
+
+def _cdp_evaluate(ws_url: str, expression: str) -> str:
+    parsed = urllib.parse.urlparse(ws_url)
+    sock = socket.create_connection((parsed.hostname, parsed.port or 80), timeout=12)
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    path = parsed.path + (("?" + parsed.query) if parsed.query else "")
+    handshake = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {parsed.hostname}:{parsed.port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n"
+    )
+    sock.sendall(handshake.encode("ascii"))
+    ack = b""
+    while b"\r\n\r\n" not in ack:
+        piece = sock.recv(4096)
+        if not piece:
+            raise LiveError("browser debug handshake failed")
+        ack += piece
+    if b"101" not in ack.split(b"\r\n", 1)[0]:
+        raise LiveError("browser debug upgrade failed")
+    message = json.dumps(
+        {
+            "id": 1,
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": expression,
+                "awaitPromise": True,
+                "returnByValue": True,
+            },
+        }
+    ).encode("utf-8")
+    _ws_send(sock, message)
+    sock.settimeout(12)
+    raw = _ws_recv(sock)
+    sock.close()
+    payload = json.loads(raw.decode("utf-8"))
+    result = ((payload.get("result") or {}).get("result") or {})
+    if result.get("type") == "string":
+        return str(result.get("value") or "")
+    if "value" in result:
+        return json.dumps(result.get("value"))
+    raise LiveError(str((payload.get("result") or {}).get("exceptionDetails") or "no session yet"))
+
+
+def start_login_browser() -> None:
+    if debugging_up():
+        return
+    binary = shutil.which("chromium") or shutil.which("chromium-browser")
+    if not binary:
+        raise LiveError("Chromium is not installed")
+    BROWSER_PROFILE.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen(
+        [
+            binary,
+            f"--user-data-dir={BROWSER_PROFILE}",
+            f"--remote-debugging-port={DEBUG_PORT}",
+            "--remote-allow-origins=*",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--app=https://chatgpt.com/",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def fetch_session_token() -> str:
+    if not debugging_up():
+        return ""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{DEBUG_PORT}/json", timeout=1.5) as response:
+            pages = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(pages, list) or not pages:
+        return ""
+    page = next((item for item in pages if "chatgpt.com" in str(item.get("url") or "")), pages[0])
+    ws_url = str(page.get("webSocketDebuggerUrl") or "")
+    if not ws_url:
+        return ""
+    expression = (
+        "(async () => { const res = await fetch('https://chatgpt.com/api/auth/session', "
+        "{ credentials: 'include' }); return await res.text(); })()"
+    )
+    try:
+        raw = _cdp_evaluate(ws_url, expression)
+        data = json.loads(raw)
+    except (LiveError, json.JSONDecodeError, TimeoutError, OSError):
+        return ""
+    token = data.get("accessToken") if isinstance(data, dict) else ""
+    return str(token or "")
+
+
+def login_start() -> dict:
+    start_login_browser()
+    token = fetch_session_token()
+    if token:
+        write_token(token)
+        return {"ok": True, "authenticated": True, "waiting": False}
+    return {"ok": True, "authenticated": False, "waiting": True}
+
+
+def login_poll() -> dict:
+    existing = read_env().get("CHATGPT_TOKEN", "")
+    if existing:
+        return {"ok": True, "authenticated": True, "waiting": False}
+    token = fetch_session_token()
+    if token:
+        write_token(token)
+        return {"ok": True, "authenticated": True, "waiting": False}
+    return {"ok": True, "authenticated": False, "waiting": debugging_up()}
 
 
 def device_id() -> str:

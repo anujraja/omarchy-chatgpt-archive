@@ -8,21 +8,21 @@ Omarchy app for a local ChatGPT conversation archive. Open it from the bar, expo
 omarchy plugin add https://github.com/anujraja/omarchy-chatgpt-archive.git --enable
 ```
 
-The **Archive** badge sits on the right of the bar:
+A compact archive icon sits on the right of the bar, like the other Omarchy status buttons:
 
 - Left click — open the app
-- Middle click — open the Export sheet
+- Middle click — export
 - Right click — open the archive folder
+
+If you are not signed in, the icon is a login glyph. After ChatGPT login it becomes the archive box.
 
 ## Export from the bar
 
-1. Click **Archive**, then **Export**.
-2. Open [chatgpt.com/api/auth/session](https://chatgpt.com/api/auth/session) while signed in.
-3. Copy `accessToken` and paste it once. It is stored only in `~/.config/chatgpt-archive/config.env` (mode 600).
-4. Choose **All projects** or one project, a date range (7 / 30 / 90 days or custom), and Incremental or Full.
-5. **Start export**. Matching threads are written as Markdown under `~/.local/share/chatgpt-archive`.
+1. Click the icon. If there is no session, press **Log in to ChatGPT**.
+2. Sign in in the ChatGPT window that opens. The app fetches the session in the background — no token paste.
+3. Choose a project and date range, then **Export**.
 
-Incremental skips conversations that have not changed since the last archive. The token is never shown in the UI after save and never passed as a command-line flag.
+Matching threads are written as Markdown under `~/.local/share/chatgpt-archive`. Incremental skips conversations that have not changed. The session is stored only in `~/.config/chatgpt-archive/config.env` (mode 600) and is never passed as a command-line flag.
 
 You can still import ChatGPT’s official ZIP from **Settings → Data controls → Export data**.
 
