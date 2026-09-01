@@ -20,6 +20,8 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import chatgpt_live
+
 INDEX_NAME = "index.json"
 CONVERSATIONS_DIR = "conversations"
 ASSETS_DIR = "assets"
@@ -243,6 +245,55 @@ def unpack_source(path: Path) -> tuple[Path, tempfile.TemporaryDirectory | None]
     raise FileNotFoundError(f"not a ChatGPT export ZIP or folder: {path}")
 
 
+def ingest_conversation(conversation: dict, archive: Path, existing: dict, project: str = "") -> bool:
+    conv_id = str(
+        conversation.get("conversation_id")
+        or conversation.get("id")
+        or conversation.get("uuid")
+        or ""
+    )
+    if not conv_id:
+        return False
+    archive.mkdir(parents=True, exist_ok=True)
+    (archive / CONVERSATIONS_DIR).mkdir(exist_ok=True)
+    title = str(conversation.get("title") or "Untitled").strip() or "Untitled"
+    created = iso_from(conversation.get("create_time"))
+    updated = iso_from(conversation.get("update_time") or conversation.get("create_time"))
+    messages = linearize(conversation)
+    stem = slug(title, conv_id[:12]) + "-" + slug(conv_id, "chat")[:12]
+    md_path = archive / CONVERSATIONS_DIR / f"{stem}.md"
+    json_path = archive / CONVERSATIONS_DIR / f"{stem}.json"
+    record = {
+        "id": conv_id,
+        "title": title,
+        "created": created,
+        "updated": updated,
+        "messages": len(messages),
+        "project": project,
+        "markdown": str(md_path.relative_to(archive)),
+        "json": str(json_path.relative_to(archive)),
+    }
+    md_path.write_text(markdown_for(title, conv_id, created, updated, messages), encoding="utf-8")
+    json_path.write_text(
+        json.dumps(
+            {
+                "id": conv_id,
+                "title": title,
+                "created": created,
+                "updated": updated,
+                "project": project,
+                "messages": messages,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    existing[conv_id] = record
+    return True
+
+
 def import_export(source: Path, archive: Path) -> dict:
     root, temp = unpack_source(source)
     try:
@@ -259,51 +310,10 @@ def import_export(source: Path, archive: Path) -> dict:
 
         for file_path in files:
             for conversation in load_conversations(file_path):
-                conv_id = str(
-                    conversation.get("conversation_id")
-                    or conversation.get("id")
-                    or conversation.get("uuid")
-                    or ""
-                )
-                if not conv_id:
+                if ingest_conversation(conversation, archive, existing):
+                    written += 1
+                else:
                     skipped += 1
-                    continue
-                title = str(conversation.get("title") or "Untitled").strip() or "Untitled"
-                created = iso_from(conversation.get("create_time"))
-                updated = iso_from(conversation.get("update_time") or conversation.get("create_time"))
-                messages = linearize(conversation)
-                stem = slug(title, conv_id[:12]) + "-" + slug(conv_id, "chat")[:12]
-                md_name = f"{stem}.md"
-                json_name = f"{stem}.json"
-                md_path = archive / CONVERSATIONS_DIR / md_name
-                json_path = archive / CONVERSATIONS_DIR / json_name
-                record = {
-                    "id": conv_id,
-                    "title": title,
-                    "created": created,
-                    "updated": updated,
-                    "messages": len(messages),
-                    "markdown": str(md_path.relative_to(archive)),
-                    "json": str(json_path.relative_to(archive)),
-                }
-                md_path.write_text(markdown_for(title, conv_id, created, updated, messages), encoding="utf-8")
-                json_path.write_text(
-                    json.dumps(
-                        {
-                            "id": conv_id,
-                            "title": title,
-                            "created": created,
-                            "updated": updated,
-                            "messages": messages,
-                        },
-                        indent=2,
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                existing[conv_id] = record
-                written += 1
 
         assets = copy_assets(root, archive / ASSETS_DIR)
         conversations = list(existing.values())
@@ -322,20 +332,30 @@ def import_export(source: Path, archive: Path) -> dict:
             temp.cleanup()
 
 
-def list_conversations(archive: Path, query: str, limit: int) -> dict:
+def list_conversations(archive: Path, query: str, limit: int, project: str = "", since: str = "", until: str = "") -> dict:
     index = read_index(archive)
     items = index.get("conversations") or []
     needle = query.strip().lower()
-    if needle:
-        items = [item for item in items if needle in str(item.get("title") or "").lower()]
+    filtered = []
+    for item in items:
+        if needle and needle not in str(item.get("title") or "").lower():
+            continue
+        if project and str(item.get("project") or "") != project:
+            continue
+        stamp = chatgpt_live.parse_time(item.get("updated") or item.get("created"))
+        if not chatgpt_live.within_range(stamp, since, until):
+            continue
+        filtered.append(item)
+    total = len(filtered)
     if limit > 0:
-        items = items[:limit]
+        filtered = filtered[:limit]
     return {
         "ok": True,
         "archive": str(archive),
         "imported_at": index.get("imported_at") or "",
-        "total": len(index.get("conversations") or []),
-        "conversations": items,
+        "total": total,
+        "conversations": filtered,
+        "authenticated": chatgpt_live.auth_status().get("authenticated", False),
     }
 
 
@@ -348,6 +368,7 @@ def status(archive: Path) -> dict:
         "imported_at": index.get("imported_at") or "",
         "conversations": len(index.get("conversations") or []),
         "live_engine": live_engine_path(),
+        "authenticated": chatgpt_live.auth_status().get("authenticated", False),
     }
 
 
@@ -367,7 +388,38 @@ def doctor(archive: Path) -> dict:
         "archive": str(archive),
         "writable": writable,
         "live_engine": live_engine_path(),
+        "authenticated": chatgpt_live.auth_status().get("authenticated", False),
     }
+
+
+def preview_conversation(archive: Path, conv_id: str) -> dict:
+    info = conversation_path(archive, conv_id)
+    if not info.get("ok"):
+        return info
+    path = Path(str(info.get("path") or ""))
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    info["preview"] = text[:6000]
+    return info
+
+
+def live_export(archive: Path, project: str, since: str, until: str, incremental: bool, limit: int) -> dict:
+    existing = {item.get("id"): item for item in read_index(archive).get("conversations", []) if item.get("id")}
+    result = chatgpt_live.export_remote(
+        archive,
+        ingest_conversation,
+        project,
+        since,
+        until,
+        incremental,
+        limit,
+        existing,
+    )
+    imported_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_index(archive, list(existing.values()), imported_at)
+    result["imported_at"] = imported_at
+    result["archive"] = str(archive)
+    result["conversations"] = len(existing)
+    return result
 
 
 def conversation_path(archive: Path, conv_id: str) -> dict:
@@ -393,9 +445,23 @@ def build_parser() -> argparse.ArgumentParser:
     import_cmd.add_argument("source")
     list_cmd = sub.add_parser("list")
     list_cmd.add_argument("--query", default="")
+    list_cmd.add_argument("--project", default="")
+    list_cmd.add_argument("--since", default="")
+    list_cmd.add_argument("--until", default="")
     list_cmd.add_argument("--limit", type=int, default=200)
     open_cmd = sub.add_parser("open")
     open_cmd.add_argument("id")
+    preview_cmd = sub.add_parser("preview")
+    preview_cmd.add_argument("id")
+    sub.add_parser("auth-status")
+    sub.add_parser("auth-clear")
+    export_cmd = sub.add_parser("export")
+    export_cmd.add_argument("--project", default="")
+    export_cmd.add_argument("--since", default="")
+    export_cmd.add_argument("--until", default="")
+    export_cmd.add_argument("--limit", type=int, default=150)
+    export_cmd.add_argument("--full", action="store_true")
+    sub.add_parser("projects")
     return parser
 
 
@@ -411,10 +477,22 @@ def main(argv: list[str] | None = None) -> int:
             source = Path(os.path.expanduser(args.source)).resolve()
             return emit(import_export(source, archive))
         if args.command == "list":
-            return emit(list_conversations(archive, args.query, args.limit))
+            return emit(list_conversations(archive, args.query, args.limit, args.project, args.since, args.until))
         if args.command == "open":
             return emit(conversation_path(archive, args.id))
+        if args.command == "preview":
+            return emit(preview_conversation(archive, args.id))
+        if args.command == "auth-status":
+            return emit(chatgpt_live.auth_status())
+        if args.command == "auth-clear":
+            return emit(chatgpt_live.clear_token())
+        if args.command == "projects":
+            return emit(chatgpt_live.list_projects())
+        if args.command == "export":
+            return emit(live_export(archive, args.project, args.since, args.until, not args.full, args.limit))
         return emit({"ok": False, "error": "unknown command"})
+    except chatgpt_live.LiveError as error:
+        return emit({"ok": False, "error": str(error)})
     except Exception as error:  # noqa: BLE001 — CLI boundary
         return emit({"ok": False, "error": str(error)})
 

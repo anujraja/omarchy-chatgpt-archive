@@ -81,6 +81,20 @@ class ArchiveTests(unittest.TestCase):
             self.assertIn("## ChatGPT", markdown)
             self.assertIn("Export this chat.", markdown)
 
+    def test_date_and_project_filters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_dir = Path(tmp)
+            source = archive_dir / "src"
+            source.mkdir()
+            conversation = sample_conversation()
+            (source / "conversations.json").write_text(json.dumps([conversation]), encoding="utf-8")
+            archive.import_export(source, archive_dir)
+            # rewrite index with a project so the local filter can use it
+            listed = archive.list_conversations(archive_dir, "", 10, project="", since="2025-01-01", until="")
+            self.assertEqual(listed["conversations"], [])
+            kept = archive.list_conversations(archive_dir, "", 10, project="", since="2023-11-01", until="2023-12-31")
+            self.assertEqual(kept["total"], 1)
+
     def test_query_filters_titles(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive_dir = Path(tmp)

@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -12,13 +13,26 @@ Item {
   property var manifest: null
   property bool opened: false
   property bool busy: false
-  property string statusText: "Import an official ChatGPT export ZIP."
+  property bool exportOpen: false
+  property bool authenticated: false
+  property string statusText: "Import a ZIP or export from ChatGPT."
   property string filterText: ""
+  property string projectId: ""
+  property string datePreset: "all"
+  property string customSince: ""
+  property string customUntil: ""
+  property string exportMode: "incremental"
   property int selectedIndex: 0
   property var conversations: []
+  property var projects: []
+  property string previewText: "Select a conversation to read it here."
+  property string previewTitle: "Preview"
   property int conversationCount: 0
   property string importedAt: ""
-  property string liveEngine: ""
+  property string progressTitle: ""
+  property int progressDone: 0
+  property int progressTotal: 0
+  property string tokenDraft: ""
 
   readonly property string pluginId: (manifest && manifest.id) ? String(manifest.id) : "io.github.anujraja.chatgpt-archive"
   readonly property string home: Quickshell.env("HOME")
@@ -34,11 +48,7 @@ Item {
     var configured = String(userSettings.archivePath || "").trim()
     return configured.length > 0 ? configured : (home + "/.local/share/chatgpt-archive")
   }
-  readonly property string scriptPath: {
-    var url = Qt.resolvedUrl("archive.py").toString()
-    if (url.indexOf("file://") === 0) return decodeURIComponent(url.substring(7))
-    return url
-  }
+  readonly property string configFile: home + "/.config/chatgpt-archive/config.env"
 
   property color background: Color.menu.background
   property color foreground: Color.menu.text
@@ -47,22 +57,30 @@ Item {
   property color scrim: Color.menu.scrim
   property color selectedBackground: Color.menu.selectedBackground
   property color selectedText: Color.menu.selectedText
+  property color muted: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.62)
+  property color panelFill: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.05)
   readonly property int cornerRadius: Style.cornerRadius
   property int contentMargin: Style.spacing.panelPadding
-  property int cardWidth: Math.min(Style.space(760), panel.width - Style.gapsOut * 2)
-  property int cardHeight: Math.min(Style.space(560), panel.height - Style.gapsOut * 2)
-  property int rowHeight: Math.max(Style.space(44), Style.font.body + Style.font.caption + Style.spacing.rowPaddingX * 2)
+  property int cardWidth: Math.min(Style.space(1120), panel.width - Style.gapsOut * 2)
+  property int cardHeight: Math.min(Style.space(740), panel.height - Style.gapsOut * 2)
+  property int rowHeight: Math.max(Style.space(52), Style.font.body + Style.font.caption + Style.spacing.rowPaddingX * 2)
 
-  readonly property var visibleConversations: {
-    var needle = filterText.trim().toLowerCase()
-    if (!needle) return conversations
-    var out = []
-    for (var i = 0; i < conversations.length; i++) {
-      var title = String(conversations[i].title || "").toLowerCase()
-      if (title.indexOf(needle) !== -1) out.push(conversations[i])
+  readonly property var dateOptions: [
+    { value: "all", label: "All dates" },
+    { value: "7d", label: "Last 7 days" },
+    { value: "30d", label: "Last 30 days" },
+    { value: "90d", label: "Last 90 days" },
+    { value: "custom", label: "Custom range" }
+  ]
+  readonly property var projectOptions: {
+    var options = [{ value: "", label: "All projects" }]
+    for (var i = 0; i < projects.length; i++) {
+      options.push({ value: String(projects[i].id || ""), label: String(projects[i].name || "Project") })
     }
-    return out
+    return options
   }
+  readonly property string sinceValue: datePreset === "custom" ? customSince : sinceForPreset(datePreset)
+  readonly property string untilValue: datePreset === "custom" ? customUntil : ""
 
   function pluginFile(name) {
     var url = Qt.resolvedUrl(name).toString()
@@ -70,17 +88,40 @@ Item {
     return url
   }
 
+  function pythonCmd() {
+    var args = ["python3", pluginFile("archive.py"), "--out", archiveDir]
+    for (var i = 0; i < arguments.length; i++) args.push(String(arguments[i]))
+    return args
+  }
+
+  function sinceForPreset(preset) {
+    if (preset === "all" || preset === "custom") return ""
+    var days = preset === "7d" ? 7 : (preset === "90d" ? 90 : 30)
+    var date = new Date()
+    date.setDate(date.getDate() - days)
+    return date.toISOString().slice(0, 10)
+  }
+
+  function parseJson(raw, fallback) {
+    try {
+      return JSON.parse(String(raw || "").trim() || "null") || fallback
+    } catch (error) {
+      return fallback
+    }
+  }
+
   function open(payloadJson) {
     root.opened = true
     root.filterText = ""
     root.selectedIndex = 0
+    var payload = root.parseJson(payloadJson, {})
+    root.exportOpen = !!(payload && payload.export)
     root.refresh()
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    root.loadProjects()
+    Qt.callLater(function() { searchField.forceActiveFocus() })
   }
 
-  function close() {
-    root.opened = false
-  }
+  function close() { root.opened = false }
 
   function dismiss() {
     root.opened = false
@@ -93,38 +134,53 @@ Item {
     else root.open("{}")
   }
 
-  function parseJson(raw, fallback) {
-    try {
-      return JSON.parse(String(raw || "").trim() || "null") || fallback
-    } catch (error) {
-      return fallback
-    }
-  }
-
-  function applyStatus(payload) {
+  function applyList(payload) {
     if (!payload || payload.ok === false) {
-      root.statusText = payload && payload.error ? payload.error : "Archive helper failed."
+      root.statusText = payload && payload.error ? payload.error : "Could not read archive."
       return
     }
-    root.conversationCount = Number(payload.conversations || payload.total || 0)
+    root.conversations = payload.conversations || []
+    root.conversationCount = Number(payload.total || root.conversations.length)
     root.importedAt = String(payload.imported_at || "")
-    if (payload.live_engine !== undefined) root.liveEngine = String(payload.live_engine || "")
-    if (payload.written !== undefined)
-      root.statusText = "Imported " + payload.written + " conversations into " + root.archiveDir
-    else if (root.conversationCount > 0)
-      root.statusText = root.conversationCount + " conversations" + (root.importedAt ? " · last import " + root.importedAt : "")
-    else
-      root.statusText = "No archive yet. Import the ZIP from ChatGPT → Settings → Data controls → Export data."
+    if (payload.authenticated !== undefined) root.authenticated = !!payload.authenticated
+    if (root.selectedIndex >= root.conversations.length) root.selectedIndex = 0
+    root.statusText = root.conversationCount + " conversations in archive"
+    if (root.conversations.length > 0) root.loadPreview()
+    else {
+      root.previewTitle = "Preview"
+      root.previewText = "Nothing here yet. Export from ChatGPT or import an official ZIP."
+    }
   }
 
   function refresh() {
     root.busy = true
+    var cmd = pythonCmd("list", "--limit", "400")
+    if (root.filterText) { cmd.push("--query"); cmd.push(root.filterText) }
+    if (root.projectId) { cmd.push("--project"); cmd.push(root.projectId) }
+    if (root.sinceValue) { cmd.push("--since"); cmd.push(root.sinceValue) }
+    if (root.untilValue) { cmd.push("--until"); cmd.push(root.untilValue) }
     listProc.running = false
-    listProc.command = ["python3", root.pluginFile("archive.py"), "--out", root.archiveDir, "list", "--limit", "400"]
+    listProc.command = cmd
     listProc.running = true
+    authProc.running = false
+    authProc.running = true
   }
 
-  function pickExport() {
+  function loadProjects() {
+    projectsProc.running = false
+    projectsProc.running = true
+  }
+
+  function loadPreview() {
+    if (root.selectedIndex < 0 || root.selectedIndex >= root.conversations.length) return
+    var item = root.conversations[root.selectedIndex]
+    root.previewTitle = String(item.title || "Untitled")
+    previewProc.running = false
+    previewProc.command = pythonCmd("preview", String(item.id || ""))
+    previewProc.running = true
+  }
+
+  function pickExportZip() {
     if (root.busy) return
     root.busy = true
     root.statusText = "Choose a ChatGPT export ZIP…"
@@ -133,81 +189,129 @@ Item {
   }
 
   function runImport(path) {
-    if (!path) {
-      root.busy = false
-      return
-    }
+    if (!path) { root.busy = false; return }
     root.busy = true
-    root.statusText = "Importing " + path + "…"
+    root.statusText = "Importing ZIP…"
     importProc.running = false
-    importProc.command = ["python3", root.pluginFile("archive.py"), "--out", root.archiveDir, "import", path]
+    importProc.command = pythonCmd("import", path)
     importProc.running = true
   }
 
   function openSelected() {
-    var items = root.visibleConversations
-    if (root.selectedIndex < 0 || root.selectedIndex >= items.length) return
-    var item = items[root.selectedIndex]
-    var relative = String(item.markdown || "")
-    if (!relative) return
-    Quickshell.execDetached(["xdg-open", root.archiveDir + "/" + relative])
+    if (root.selectedIndex < 0 || root.selectedIndex >= root.conversations.length) return
+    var item = root.conversations[root.selectedIndex]
+    if (!item || !item.markdown) return
+    Quickshell.execDetached(["xdg-open", root.archiveDir + "/" + item.markdown])
   }
 
   function openFolder() {
     Quickshell.execDetached(["bash", "-lc", "mkdir -p " + JSON.stringify(root.archiveDir) + " && xdg-open " + JSON.stringify(root.archiveDir)])
   }
 
-  function runLiveExport() {
-    if (!root.liveEngine || root.busy) return
+  function saveToken() {
+    var token = String(root.tokenDraft || "").trim()
+    if (!token) {
+      root.statusText = "Paste the accessToken first."
+      return
+    }
+    tokenFile.setText("CHATGPT_TOKEN=" + token + "\n")
+    root.tokenDraft = ""
+    root.statusText = "Session saved on this machine. Token is not shown again."
+    authProc.running = false
+    authProc.running = true
+    root.loadProjects()
+  }
+
+  function startExport() {
+    if (root.busy) return
+    if (!root.authenticated) {
+      root.exportOpen = true
+      root.statusText = "Save a ChatGPT session token to export from the bar."
+      return
+    }
     root.busy = true
-    root.statusText = "Running chatgpt-download-engine export incremental…"
-    liveProc.running = false
-    liveProc.command = [root.liveEngine, "export", "incremental"]
-    liveProc.running = true
+    root.statusText = "Exporting from ChatGPT…"
+    var cmd = pythonCmd("export")
+    if (root.projectId) { cmd.push("--project"); cmd.push(root.projectId) }
+    if (root.sinceValue) { cmd.push("--since"); cmd.push(root.sinceValue) }
+    if (root.untilValue) { cmd.push("--until"); cmd.push(root.untilValue) }
+    if (root.exportMode === "full") cmd.push("--full")
+    exportProc.running = false
+    exportProc.command = cmd
+    exportProc.running = true
   }
 
   function moveSelection(delta) {
-    var count = root.visibleConversations.length
-    if (count === 0) {
-      root.selectedIndex = 0
-      return
-    }
+    if (root.conversations.length === 0) return
     var next = root.selectedIndex + delta
     if (next < 0) next = 0
-    if (next >= count) next = count - 1
+    if (next >= root.conversations.length) next = root.conversations.length - 1
     root.selectedIndex = next
+    root.loadPreview()
+  }
+
+  FileView {
+    id: tokenFile
+    path: root.configFile
+    atomicWrites: true
+    printErrors: false
+  }
+
+  FileView {
+    id: progressFile
+    path: root.archiveDir + "/.progress.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: {
+      var payload = root.parseJson(text(), {})
+      root.progressTitle = String(payload.title || "")
+      root.progressDone = Number(payload.done || 0)
+      root.progressTotal = Number(payload.total || 0)
+      if (payload.phase && payload.phase !== "done")
+        root.statusText = (payload.phase === "downloading" ? "Downloading" : "Listing") + " " + root.progressDone + "/" + root.progressTotal + " · " + root.progressTitle
+    }
+    onFileChanged: reload()
   }
 
   Process {
     id: listProc
     running: false
-    stdout: StdioCollector {
-      id: listOut
-      waitForEnd: true
-    }
-    stderr: StdioCollector { waitForEnd: true }
+    stdout: StdioCollector { id: listOut; waitForEnd: true }
     onExited: {
-      var payload = root.parseJson(listOut.text, { ok: false, error: "Could not read archive." })
-      root.applyStatus(payload)
-      root.conversations = payload.conversations || []
-      if (root.selectedIndex >= root.visibleConversations.length) root.selectedIndex = 0
-      statusProc.running = false
-      statusProc.running = true
+      root.applyList(root.parseJson(listOut.text, { ok: false }))
+      root.busy = false
     }
   }
 
   Process {
-    id: statusProc
+    id: authProc
     running: false
-    command: ["python3", root.pluginFile("archive.py"), "--out", root.archiveDir, "status"]
-    stdout: StdioCollector {
-      id: statusOut
-      waitForEnd: true
-    }
+    command: ["python3", root.pluginFile("archive.py"), "auth-status"]
+    stdout: StdioCollector { id: authOut; waitForEnd: true }
     onExited: {
-      var payload = root.parseJson(statusOut.text, {})
-      if (payload && payload.live_engine !== undefined) root.liveEngine = String(payload.live_engine || "")
-      root.busy = false
+      var payload = root.parseJson(authOut.text, {})
+      root.authenticated = !!payload.authenticated
+    }
+  }
+
+  Process {
+    id: projectsProc
+    running: false
+    command: ["python3", root.pluginFile("archive.py"), "projects"]
+    stdout: StdioCollector { id: projectsOut; waitForEnd: true }
+    onExited: {
+      var payload = root.parseJson(projectsOut.text, {})
+      if (payload && payload.ok) root.projects = payload.projects || []
+    }
+  }
+
+  Process {
+    id: previewProc
+    running: false
+    stdout: StdioCollector { id: previewOut; waitForEnd: true }
+    onExited: {
+      var payload = root.parseJson(previewOut.text, {})
+      root.previewText = String(payload.preview || payload.error || "No preview.")
     }
   }
 
@@ -215,17 +319,13 @@ Item {
     id: pickProc
     running: false
     command: ["omarchy", "file", "select", "--title", "Import ChatGPT export", "--extensions", "zip"]
-    stdout: StdioCollector {
-      id: pickOut
-      waitForEnd: true
-    }
+    stdout: StdioCollector { id: pickOut; waitForEnd: true }
     onExited: function(code) {
       var path = String(pickOut.text || "").trim().split("\n")[0]
       if (path) root.runImport(path)
       else {
         root.busy = false
-        if (code === 1) root.statusText = "Import cancelled."
-        else root.statusText = "File picker did not return a ZIP."
+        root.statusText = code === 1 ? "Import cancelled." : "No ZIP selected."
       }
     }
   }
@@ -233,38 +333,30 @@ Item {
   Process {
     id: importProc
     running: false
-    stdout: StdioCollector {
-      id: importOut
-      waitForEnd: true
-    }
-    stderr: StdioCollector {
-      id: importErr
-      waitForEnd: true
-    }
+    stdout: StdioCollector { id: importOut; waitForEnd: true }
+    stderr: StdioCollector { id: importErr; waitForEnd: true }
     onExited: {
       var payload = root.parseJson(importOut.text, { ok: false, error: String(importErr.text || "Import failed.").trim() })
-      root.applyStatus(payload)
       root.busy = false
+      root.statusText = payload.ok ? ("Imported " + payload.written + " conversations") : (payload.error || "Import failed")
       root.refresh()
     }
   }
 
   Process {
-    id: liveProc
+    id: exportProc
     running: false
-    stdout: StdioCollector {
-      id: liveOut
-      waitForEnd: true
-    }
-    stderr: StdioCollector {
-      id: liveErr
-      waitForEnd: true
-    }
-    onExited: function(code) {
+    stdout: StdioCollector { id: exportOut; waitForEnd: true }
+    stderr: StdioCollector { id: exportErr; waitForEnd: true }
+    onExited: {
+      var payload = root.parseJson(exportOut.text, { ok: false, error: String(exportErr.text || "Export failed.").trim() })
       root.busy = false
-      var output = String(liveOut.text || liveErr.text || "").trim()
-      if (code === 0) root.statusText = output || "Live export finished."
-      else root.statusText = output || "Live export failed. Configure chatgpt-download-engine first."
+      root.exportOpen = false
+      if (payload.ok)
+        root.statusText = "Exported " + (payload.written || 0) + " conversations" + (payload.skipped ? (" · skipped " + payload.skipped) : "")
+      else
+        root.statusText = payload.error || "Export failed"
+      root.refresh()
     }
   }
 
@@ -278,15 +370,8 @@ Item {
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
 
-    Rectangle {
-      anchors.fill: parent
-      color: root.scrim
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      onClicked: root.dismiss()
-    }
+    Rectangle { anchors.fill: parent; color: root.scrim }
+    MouseArea { anchors.fill: parent; onClicked: root.dismiss() }
 
     BorderSurface {
       id: card
@@ -297,46 +382,9 @@ Item {
       color: root.background
       borderSpec: root.borderSpec
       padding: root.contentMargin
-
       MouseArea { anchors.fill: parent; onClicked: {} }
 
-      Item {
-        id: keyCatcher
-        anchors.fill: parent
-        focus: true
-        Keys.priority: Keys.BeforeItem
-        Keys.onPressed: function(event) {
-          if (event.key === Qt.Key_Escape) {
-            if (root.filterText) root.filterText = ""
-            else root.dismiss()
-            event.accepted = true
-          } else if (event.key === Qt.Key_Up) {
-            root.moveSelection(-1)
-            event.accepted = true
-          } else if (event.key === Qt.Key_Down) {
-            root.moveSelection(1)
-            event.accepted = true
-          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            root.openSelected()
-            event.accepted = true
-          } else if (event.key === Qt.Key_I && event.modifiers & Qt.ControlModifier) {
-            root.pickExport()
-            event.accepted = true
-          } else if (event.key === Qt.Key_O && event.modifiers & Qt.ControlModifier) {
-            root.openFolder()
-            event.accepted = true
-          } else if (event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127) {
-            root.filterText += event.text
-            root.selectedIndex = 0
-            event.accepted = true
-          } else if (event.key === Qt.Key_Backspace) {
-            root.filterText = root.filterText.slice(0, Math.max(0, root.filterText.length - 1))
-            event.accepted = true
-          }
-        }
-      }
-
-      Column {
+      ColumnLayout {
         anchors.fill: parent
         anchors.topMargin: card.contentTopInset
         anchors.rightMargin: card.contentRightInset
@@ -344,109 +392,377 @@ Item {
         anchors.leftMargin: card.contentLeftInset
         spacing: Style.spacing.md
 
-        Text {
-          text: "ChatGPT Archive"
-          color: root.foreground
-          font.family: Style.font.menuFamily
-          font.pixelSize: Style.font.title
-          font.bold: true
-        }
-
-        Text {
-          width: parent.width
-          wrapMode: Text.Wrap
-          text: root.statusText
-          color: root.foreground
-          opacity: 0.8
-          font.family: Style.font.menuFamily
-          font.pixelSize: Style.font.caption
-        }
-
-        Text {
-          visible: root.filterText.length > 0
-          text: "Filter: " + root.filterText
-          color: root.foreground
-          font.family: Style.font.menuFamily
-          font.pixelSize: Style.font.caption
-        }
-
-        Row {
+        RowLayout {
+          Layout.fillWidth: true
           spacing: Style.spacing.sm
 
-          WidgetButton {
-            bar: null
-            text: root.busy ? "Working…" : "Import ZIP"
-            onPressed: root.pickExport()
+          Column {
+            Layout.fillWidth: true
+            spacing: 2
+            Text {
+              text: "ChatGPT Archive"
+              color: root.foreground
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+            Text {
+              text: root.authenticated ? "Session ready · export from the bar" : "Local archive · add a session to export live"
+              color: root.muted
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.caption
+            }
           }
-          WidgetButton {
-            bar: null
-            text: "Open folder"
-            onPressed: root.openFolder()
+
+          Button {
+            text: root.busy ? "Working…" : "Export"
+            active: true
+            foreground: root.foreground
+            accent: Color.accent
+            onClicked: root.exportOpen = true
           }
-          WidgetButton {
-            visible: root.liveEngine.length > 0
-            bar: null
-            text: "Live export"
-            onPressed: root.runLiveExport()
+          Button {
+            text: "Import ZIP"
+            bordered: true
+            foreground: root.foreground
+            onClicked: root.pickExportZip()
+          }
+          Button {
+            text: "Folder"
+            bordered: true
+            foreground: root.foreground
+            onClicked: root.openFolder()
           }
         }
 
-        ListView {
-          id: list
-          width: parent.width
-          height: parent.height - Style.space(140)
-          clip: true
-          model: root.visibleConversations
-          currentIndex: root.selectedIndex
-          delegate: Rectangle {
-            required property var modelData
-            required property int index
-            width: list.width
-            height: root.rowHeight
-            color: index === root.selectedIndex ? root.selectedBackground : "transparent"
-            radius: Style.space(4)
+        RowLayout {
+          Layout.fillWidth: true
+          spacing: Style.spacing.sm
 
-            Column {
-              anchors.verticalCenter: parent.verticalCenter
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.leftMargin: Style.space(8)
-              anchors.rightMargin: Style.space(8)
-              spacing: 2
-
-              Text {
-                width: parent.width
-                text: String(modelData.title || "Untitled")
-                elide: Text.ElideRight
-                color: index === root.selectedIndex ? root.selectedText : root.foreground
-                font.family: Style.font.menuFamily
-                font.pixelSize: Style.font.body
-              }
-              Text {
-                width: parent.width
-                text: String(modelData.updated || modelData.created || "") + " · " + String(modelData.messages || 0) + " messages"
-                elide: Text.ElideRight
-                color: index === root.selectedIndex ? root.selectedText : root.foreground
-                opacity: 0.7
-                font.family: Style.font.menuFamily
-                font.pixelSize: Style.font.caption
+          TextField {
+            id: searchField
+            Layout.fillWidth: true
+            placeholderText: "Search conversations"
+            text: root.filterText
+            foreground: root.foreground
+            accent: Color.accent
+            onTextChanged: {
+              root.filterText = text
+              searchDebounce.restart()
+            }
+            Keys.onPressed: function(event) {
+              if (event.key === Qt.Key_Escape) {
+                if (root.filterText) { root.filterText = ""; searchField.text = "" }
+                else root.dismiss()
+                event.accepted = true
+              } else if (event.key === Qt.Key_Down) {
+                root.moveSelection(1)
+                event.accepted = true
               }
             }
+          }
 
-            MouseArea {
+          Dropdown {
+            label: ""
+            showLabel: false
+            Layout.preferredWidth: Style.space(220)
+            value: root.projectId
+            options: root.projectOptions
+            foreground: root.foreground
+            onChanged: function(value) {
+              root.projectId = value
+              root.refresh()
+            }
+          }
+
+          Dropdown {
+            label: ""
+            showLabel: false
+            Layout.preferredWidth: Style.space(180)
+            value: root.datePreset
+            options: root.dateOptions
+            foreground: root.foreground
+            onChanged: function(value) {
+              root.datePreset = value
+              root.refresh()
+            }
+          }
+        }
+
+        RowLayout {
+          visible: root.datePreset === "custom"
+          Layout.fillWidth: true
+          spacing: Style.spacing.sm
+          TextField {
+            Layout.fillWidth: true
+            placeholderText: "Since YYYY-MM-DD"
+            text: root.customSince
+            foreground: root.foreground
+            onEditingFinished: { root.customSince = text; root.refresh() }
+          }
+          TextField {
+            Layout.fillWidth: true
+            placeholderText: "Until YYYY-MM-DD"
+            text: root.customUntil
+            foreground: root.foreground
+            onEditingFinished: { root.customUntil = text; root.refresh() }
+          }
+        }
+
+        RowLayout {
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          spacing: Style.spacing.md
+
+          BorderSurface {
+            Layout.preferredWidth: Style.space(360)
+            Layout.fillHeight: true
+            color: root.panelFill
+            radius: root.cornerRadius
+            borderSpec: Border.flat(Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10), 1)
+
+            ListView {
+              id: list
               anchors.fill: parent
-              onClicked: {
-                root.selectedIndex = index
-                keyCatcher.forceActiveFocus()
+              anchors.margins: Style.space(8)
+              clip: true
+              model: root.conversations
+              currentIndex: root.selectedIndex
+              boundsBehavior: Flickable.StopAtBounds
+              delegate: Rectangle {
+                required property var modelData
+                required property int index
+                width: ListView.view.width
+                height: root.rowHeight
+                radius: Style.space(8)
+                color: index === root.selectedIndex ? root.selectedBackground : "transparent"
+
+                Column {
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(10)
+                  spacing: 3
+                  Text {
+                    width: parent.width
+                    text: String(modelData.title || "Untitled")
+                    elide: Text.ElideRight
+                    color: index === root.selectedIndex ? root.selectedText : root.foreground
+                    font.family: Style.font.menuFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: index === root.selectedIndex
+                  }
+                  Text {
+                    width: parent.width
+                    text: String(modelData.updated || modelData.created || "").slice(0, 10) + " · " + String(modelData.messages || 0) + " messages"
+                    elide: Text.ElideRight
+                    color: index === root.selectedIndex ? root.selectedText : root.muted
+                    font.family: Style.font.menuFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  onClicked: {
+                    root.selectedIndex = index
+                    root.loadPreview()
+                    searchField.forceActiveFocus()
+                  }
+                  onDoubleClicked: {
+                    root.selectedIndex = index
+                    root.openSelected()
+                  }
+                }
               }
-              onDoubleClicked: {
-                root.selectedIndex = index
-                root.openSelected()
+            }
+          }
+
+          BorderSurface {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            color: root.panelFill
+            radius: root.cornerRadius
+            borderSpec: Border.flat(Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10), 1)
+
+            ColumnLayout {
+              anchors.fill: parent
+              anchors.margins: Style.space(16)
+              spacing: Style.spacing.sm
+
+              Text {
+                text: root.previewTitle
+                color: root.foreground
+                font.family: Style.font.menuFamily
+                font.pixelSize: Style.font.heading
+                font.bold: true
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+              }
+
+              Flickable {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                contentWidth: width
+                contentHeight: previewBody.height
+                Text {
+                  id: previewBody
+                  width: parent.width
+                  text: root.previewText
+                  wrapMode: Text.Wrap
+                  color: root.foreground
+                  opacity: 0.92
+                  font.family: Style.font.menuFamily
+                  font.pixelSize: Style.font.body
+                }
+              }
+
+              Button {
+                visible: root.conversations.length > 0
+                text: "Open Markdown"
+                bordered: true
+                foreground: root.foreground
+                onClicked: root.openSelected()
+              }
+            }
+          }
+        }
+
+        Text {
+          Layout.fillWidth: true
+          text: root.statusText
+          color: root.muted
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      Rectangle {
+        visible: root.exportOpen
+        anchors.fill: parent
+        color: Qt.rgba(0, 0, 0, 0.35)
+        radius: root.cornerRadius
+        MouseArea { anchors.fill: parent; onClicked: root.exportOpen = false }
+
+        BorderSurface {
+          width: Math.min(parent.width - Style.space(80), Style.space(560))
+          height: Math.min(parent.height - Style.space(80), implicitHeight)
+          implicitHeight: exportForm.implicitHeight + Style.space(36)
+          anchors.centerIn: parent
+          radius: root.cornerRadius
+          color: root.background
+          borderSpec: root.borderSpec
+          MouseArea { anchors.fill: parent; onClicked: {} }
+
+          Column {
+            id: exportForm
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.space(22)
+            spacing: Style.spacing.md
+
+            Text {
+              text: "Export from ChatGPT"
+              color: root.foreground
+              font.pixelSize: Style.font.title
+              font.bold: true
+              font.family: Style.font.menuFamily
+            }
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: "Uses your browser session. Open chatgpt.com/api/auth/session, copy accessToken, and save it here once. It stays in ~/.config/chatgpt-archive/config.env."
+              color: root.muted
+              font.pixelSize: Style.font.caption
+              font.family: Style.font.menuFamily
+            }
+
+            TextField {
+              width: parent.width
+              visible: !root.authenticated
+              password: true
+              placeholderText: "Paste accessToken"
+              text: root.tokenDraft
+              foreground: root.foreground
+              accent: Color.accent
+              onTextChanged: root.tokenDraft = text
+            }
+            Button {
+              visible: !root.authenticated
+              text: "Save session"
+              active: true
+              foreground: root.foreground
+              accent: Color.accent
+              onClicked: root.saveToken()
+            }
+
+            Dropdown {
+              width: parent.width
+              label: "Project"
+              value: root.projectId
+              options: root.projectOptions
+              foreground: root.foreground
+              onChanged: function(value) { root.projectId = value }
+            }
+            Dropdown {
+              width: parent.width
+              label: "Date range"
+              value: root.datePreset
+              options: root.dateOptions
+              foreground: root.foreground
+              onChanged: function(value) { root.datePreset = value }
+            }
+            Dropdown {
+              width: parent.width
+              label: "Mode"
+              value: root.exportMode
+              options: [
+                { value: "incremental", label: "Incremental — skip unchanged" },
+                { value: "full", label: "Full refresh of the match set" }
+              ]
+              foreground: root.foreground
+              onChanged: function(value) { root.exportMode = value }
+            }
+
+            Row {
+              spacing: Style.spacing.sm
+              Button {
+                text: "Start export"
+                active: true
+                foreground: root.foreground
+                accent: Color.accent
+                onClicked: root.startExport()
+              }
+              Button {
+                text: "Cancel"
+                bordered: true
+                foreground: root.foreground
+                onClicked: root.exportOpen = false
               }
             }
           }
         }
       }
+    }
+  }
+
+  Timer {
+    id: searchDebounce
+    interval: 180
+    repeat: false
+    onTriggered: root.refresh()
+  }
+
+  Keys.onPressed: function(event) {
+    if (!root.opened) return
+    if (event.key === Qt.Key_Escape) {
+      if (root.exportOpen) root.exportOpen = false
+      else root.dismiss()
+      event.accepted = true
     }
   }
 }
