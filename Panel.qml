@@ -155,11 +155,30 @@ Panel {
     scheduleSetProc.running = true
   }
 
+  function openFolder() {
+    Quickshell.execDetached(["bash", "-lc", "mkdir -p " + JSON.stringify(root.archiveDir) + " && xdg-open " + JSON.stringify(root.archiveDir)])
+  }
+
+  function projectNameFor(id) {
+    var needle = String(id || "")
+    for (var i = 0; i < root.projects.length; i++) {
+      if (String(root.projects[i].id || "") === needle)
+        return String(root.projects[i].name || "")
+    }
+    return ""
+  }
+
   function openSelected() {
     if (root.selectedIndex < 0 || root.selectedIndex >= root.conversations.length) return
     var item = root.conversations[root.selectedIndex]
     if (!item || !item.markdown) return
     Quickshell.execDetached(["xdg-open", root.archiveDir + "/" + item.markdown])
+  }
+
+  function openConversation(index) {
+    if (index < 0 || index >= root.conversations.length) return
+    root.selectedIndex = index
+    root.openSelected()
   }
 
   FileView {
@@ -270,7 +289,7 @@ Panel {
       Column {
         id: body
         width: parent.width
-        spacing: Style.space(12)
+        spacing: Style.space(10)
 
         RowLayout {
           width: parent.width
@@ -279,47 +298,77 @@ Panel {
             Layout.fillWidth: true
             spacing: 2
             Text {
-              text: root.page === "settings" ? "Settings" : "ChatGPT Archive"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.subtitle
-              font.bold: true
-            }
-            Text {
-              text: root.exporting ? root.statusText : (root.authenticated ? root.statusText : "Not signed in")
+              text: root.page === "settings" ? "SETTINGS" : "ARCHIVE"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.2
+            }
+            Text {
+              width: parent.width
+              text: root.exporting
+                ? root.statusText
+                : (root.authenticated ? (root.conversations.length + " files") : "offline · local files only")
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              elide: Text.ElideRight
             }
           }
           Button {
-            text: root.page === "settings" ? "Back" : "Settings"
+            text: root.page === "settings" ? "Home" : "Settings"
             bordered: true
             foreground: root.foreground
             onClicked: root.page = root.page === "settings" ? "archive" : "settings"
           }
         }
 
+        Row {
+          width: parent.width
+          spacing: Style.space(6)
+          Button {
+            visible: root.page !== "settings"
+            text: root.exporting ? "Syncing…" : "Export"
+            active: true
+            foreground: root.foreground
+            accent: Color.accent
+            onClicked: root.startExport()
+          }
+          Button {
+            text: "Folder"
+            bordered: true
+            foreground: root.foreground
+            onClicked: root.openFolder()
+          }
+          Button {
+            visible: root.page !== "settings" && !root.authenticated
+            text: root.waitingLogin ? "Waiting…" : "Login"
+            bordered: true
+            foreground: root.foreground
+            onClicked: root.startLogin()
+          }
+        }
+
         Rectangle {
           visible: root.exporting
           width: parent.width
-          height: Style.space(8)
-          radius: height / 2
-          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
+          height: Style.space(6)
+          radius: 1
+          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
           Rectangle {
-            width: Math.max(Style.space(12), parent.width * root.progressFraction)
+            width: Math.max(Style.space(8), parent.width * root.progressFraction)
             height: parent.height
-            radius: parent.radius
             color: Color.accent
-            Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+            Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
           }
         }
         Text {
           visible: root.exporting && root.progressTitle.length > 0
           width: parent.width
-          text: root.progressTitle
+          text: "> " + root.progressTitle
           elide: Text.ElideRight
-          color: root.dim
+          color: Color.accent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }
@@ -329,17 +378,22 @@ Panel {
           width: parent.width
           spacing: Style.space(10)
 
+          PanelSectionHeader {
+            text: "SCHEDULE"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
           Text {
             width: parent.width
             wrapMode: Text.Wrap
-            text: "Scheduled exports run on this machine while you are logged in. They use the same ChatGPT session as the bar."
+            text: "Runs on this machine while you are logged in. Uses the same ChatGPT session as the bar."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
           }
           Dropdown {
             width: parent.width
-            label: "Schedule"
+            label: "Repeat"
             value: root.scheduleMode
             options: [
               { value: "off", label: "Off" },
@@ -375,7 +429,7 @@ Panel {
           }
           Text {
             visible: root.scheduleLast.length > 0
-            text: "Last run: " + root.scheduleLast
+            text: "last run  " + root.scheduleLast
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -387,42 +441,24 @@ Panel {
             accent: Color.accent
             onClicked: root.saveSchedule()
           }
-          Button {
-            text: "Open archive folder"
-            bordered: true
-            foreground: root.foreground
-            onClicked: Quickshell.execDetached(["bash", "-lc", "mkdir -p " + JSON.stringify(root.archiveDir) + " && xdg-open " + JSON.stringify(root.archiveDir)])
-          }
         }
 
         Column {
-          visible: root.page !== "settings" && !root.authenticated
+          visible: root.page !== "settings"
           width: parent.width
-          spacing: Style.space(10)
+          spacing: Style.space(8)
 
           Text {
+            visible: !root.authenticated
             width: parent.width
             wrapMode: Text.Wrap
             text: root.waitingLogin
-              ? "Sign in in the ChatGPT window. This panel will catch the session automatically."
-              : "Log in to ChatGPT in the browser, then export chats from this panel."
+              ? "Sign in in the ChatGPT window. Session is captured in the background."
+              : "Login to sync. Local .md files still open without a session."
             color: root.dim
             font.family: root.fontFamily
-            font.pixelSize: Style.font.body
+            font.pixelSize: Style.font.caption
           }
-          Button {
-            text: root.waitingLogin ? "Waiting for login…" : "Log in to ChatGPT"
-            active: true
-            foreground: root.foreground
-            accent: Color.accent
-            onClicked: root.startLogin()
-          }
-        }
-
-        Column {
-          visible: root.page !== "settings" && root.authenticated
-          width: parent.width
-          spacing: Style.space(10)
 
           Dropdown {
             width: parent.width
@@ -434,7 +470,7 @@ Panel {
           }
           Dropdown {
             width: parent.width
-            label: "Date range"
+            label: "Range"
             value: root.datePreset
             options: root.dateOptions
             foreground: root.foreground
@@ -442,7 +478,7 @@ Panel {
           }
           TextField {
             width: parent.width
-            placeholderText: "Search chats"
+            placeholderText: "filter title…"
             text: root.filterText
             foreground: root.foreground
             onTextChanged: {
@@ -450,12 +486,22 @@ Panel {
               searchDebounce.restart()
             }
           }
-          Button {
-            text: root.exporting ? "Downloading…" : "Export chats"
-            active: true
+
+          PanelSeparator { foreground: root.foreground }
+
+          PanelSectionHeader {
+            text: "MARKDOWN"
             foreground: root.foreground
-            accent: Color.accent
-            onClicked: root.startExport()
+            fontFamily: root.fontFamily
+          }
+
+          Text {
+            visible: root.conversations.length === 0
+            width: parent.width
+            text: "No files yet. Export or drop in a ZIP."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
           }
 
           Repeater {
@@ -464,40 +510,57 @@ Panel {
               required property var modelData
               required property int index
               width: body.width
-              height: Style.space(44)
-              radius: Style.space(8)
-              color: index === root.selectedIndex ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18) : "transparent"
+              height: Style.space(46)
+              radius: Style.space(6)
+              color: hover.hovered || index === root.selectedIndex
+                ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.16)
+                : "transparent"
+
+              HoverHandler { id: hover }
+
               MouseArea {
                 anchors.fill: parent
-                onClicked: root.selectedIndex = index
-                onDoubleClicked: { root.selectedIndex = index; root.openSelected() }
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                cursorShape: Qt.PointingHandCursor
+                onClicked: function(mouse) {
+                  root.selectedIndex = index
+                  if (mouse.button === Qt.RightButton) root.openFolder()
+                  else root.openConversation(index)
+                }
               }
-              Column {
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.left: parent.left
-                anchors.right: parent.right
+
+              RowLayout {
+                anchors.fill: parent
                 anchors.leftMargin: Style.space(8)
                 anchors.rightMargin: Style.space(8)
-                spacing: 2
-                Text {
-                  width: parent.width
-                  text: String(modelData.title || "Untitled")
-                  elide: Text.ElideRight
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
+                spacing: Style.space(8)
+
+                Column {
+                  Layout.fillWidth: true
+                  spacing: 1
+                  Text {
+                    width: parent.width
+                    text: String(modelData.title || "untitled").replace(/\s+/g, "-").toLowerCase() + ".md"
+                    elide: Text.ElideRight
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+                  Text {
+                    width: parent.width
+                    text: {
+                      var name = root.projectNameFor(modelData.project)
+                      var date = String(modelData.updated || "").slice(0, 10)
+                      return (name ? name + "  " : "") + date
+                    }
+                    elide: Text.ElideRight
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
                 }
                 Text {
-                  width: parent.width
-                  text: {
-                    var projectName = ""
-                    for (var i = 0; i < root.projects.length; i++) {
-                      if (String(root.projects[i].id || "") === String(modelData.project || ""))
-                        projectName = String(root.projects[i].name || "")
-                    }
-                    var date = String(modelData.updated || "").slice(0, 10)
-                    return projectName ? (projectName + " · " + date) : date
-                  }
+                  text: String(modelData.messages || 0)
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption

@@ -36,6 +36,7 @@ omarchy restart shell
 - **Left click** — open the panel under the icon
 - **Middle click** — start an export
 - **Right click** — open `~/.local/share/chatgpt-archive`
+- In the panel, click a chat to open its Markdown. **Folder** is on the home screen and in Settings.
 
 If you are not signed in, the panel shows **Log in to ChatGPT**. That opens ChatGPT in a browser window; the plugin reads the session in the background. No token paste.
 
