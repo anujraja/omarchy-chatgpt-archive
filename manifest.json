@@ -2,22 +2,19 @@
   "schemaVersion": 1,
   "id": "io.github.anujraja.chatgpt-archive",
   "name": "ChatGPT Archive",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "author": "Anuj Raja",
   "license": "MIT",
-  "description": "Import official ChatGPT export ZIPs into a local Markdown archive, then browse and open conversations from the Omarchy bar.",
+  "description": "Bar panel to log in to ChatGPT, export chats with progress, and schedule daily or weekly archives.",
   "kinds": [
-    "bar-widget",
-    "overlay"
+    "bar-widget"
   ],
-  "keepLoaded": true,
   "entryPoints": {
-    "barWidget": "BarWidget.qml",
-    "overlay": "Overlay.qml"
+    "barWidget": "BarWidget.qml"
   },
   "barWidget": {
     "displayName": "ChatGPT Archive",
-    "description": "Open the local ChatGPT conversation archive. Left click opens the overlay; right click opens the archive folder.",
+    "description": "Compact zip icon. Left click opens a panel by the bar; middle click exports; right click opens the archive folder.",
     "category": "Productivity",
     "defaultSection": "right",
     "allowMultiple": false

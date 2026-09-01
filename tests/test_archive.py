@@ -95,6 +95,11 @@ class ArchiveTests(unittest.TestCase):
             kept = archive.list_conversations(archive_dir, "", 10, project="", since="2023-11-01", until="2023-12-31")
             self.assertEqual(kept["total"], 1)
 
+    def test_schedule_time_validation(self):
+        self.assertEqual(archive._valid_time("9:05"), "09:05")
+        with self.assertRaises(ValueError):
+            archive._valid_time("25:00")
+
     def test_query_filters_titles(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive_dir = Path(tmp)

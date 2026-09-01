@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -419,7 +420,145 @@ def live_export(archive: Path, project: str, since: str, until: str, incremental
     result["imported_at"] = imported_at
     result["archive"] = str(archive)
     result["conversations"] = len(existing)
+    chatgpt_live.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (chatgpt_live.CONFIG_DIR / "last-run.json").write_text(
+        json.dumps(
+            {
+                "at": imported_at,
+                "written": result.get("written", 0),
+                "skipped": result.get("skipped", 0),
+                "errors": result.get("errors", 0),
+                "ok": result.get("ok", False),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return result
+
+
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+SCHEDULE_FILE = chatgpt_live.CONFIG_DIR / "schedule.json"
+UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
+SERVICE_UNIT = UNIT_DIR / "chatgpt-archive.service"
+TIMER_UNIT = UNIT_DIR / "chatgpt-archive.timer"
+
+
+def _valid_time(value: str) -> str:
+    parts = value.strip().split(":")
+    if len(parts) != 2:
+        raise ValueError("time must be HH:MM")
+    hour, minute = int(parts[0]), int(parts[1])
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError("time must be HH:MM")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def schedule_payload() -> dict:
+    data = {
+        "ok": True,
+        "mode": "off",
+        "time": "09:00",
+        "weekday": "mon",
+        "enabled": False,
+        "last_run": "",
+        "last_status": "",
+    }
+    if SCHEDULE_FILE.is_file():
+        try:
+            stored = json.loads(SCHEDULE_FILE.read_text(encoding="utf-8"))
+            if isinstance(stored, dict):
+                data.update({key: stored.get(key, data[key]) for key in ("mode", "time", "weekday")})
+        except (OSError, json.JSONDecodeError):
+            pass
+    last_path = chatgpt_live.CONFIG_DIR / "last-run.json"
+    if last_path.is_file():
+        try:
+            last = json.loads(last_path.read_text(encoding="utf-8"))
+            data["last_run"] = str(last.get("at") or "")
+            data["last_status"] = "exported " + str(last.get("written", 0)) + " chats"
+            if last.get("ok") is False:
+                data["last_status"] = "last export had errors"
+        except (OSError, json.JSONDecodeError):
+            pass
+    enabled = subprocess.run(
+        ["systemctl", "--user", "is-enabled", "chatgpt-archive.timer"],
+        capture_output=True,
+        text=True,
+    )
+    data["enabled"] = enabled.returncode == 0 and enabled.stdout.strip() == "enabled"
+    return data
+
+
+def _write_units(mode: str, clock: str, weekday: str, archive: Path) -> None:
+    UNIT_DIR.mkdir(parents=True, exist_ok=True)
+    script = Path(__file__).resolve()
+    python = sys.executable or "/usr/bin/python3"
+    calendar = f"*-*-* {clock}:00"
+    if mode == "weekly":
+        calendar = f"{weekday[:3].capitalize()} *-*-* {clock}:00"
+    SERVICE_UNIT.write_text(
+        "\n".join(
+            [
+                "[Unit]",
+                "Description=ChatGPT Archive scheduled export",
+                "",
+                "[Service]",
+                "Type=oneshot",
+                f"ExecStart={python} {script} --out {archive} export",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    TIMER_UNIT.write_text(
+        "\n".join(
+            [
+                "[Unit]",
+                "Description=ChatGPT Archive export schedule",
+                "",
+                "[Timer]",
+                f"OnCalendar={calendar}",
+                "Persistent=true",
+                "",
+                "[Install]",
+                "WantedBy=timers.target",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def schedule_set(archive: Path, mode: str, clock: str, weekday: str) -> dict:
+    mode = (mode or "off").strip().lower()
+    if mode not in {"off", "daily", "weekly"}:
+        raise ValueError("mode must be off, daily, or weekly")
+    clock = _valid_time(clock or "09:00")
+    weekday = (weekday or "mon").strip().lower()[:3]
+    if weekday not in WEEKDAYS:
+        raise ValueError("weekday must be mon-sun")
+    chatgpt_live.ensure_config_dir()
+    SCHEDULE_FILE.write_text(
+        json.dumps({"mode": mode, "time": clock, "weekday": weekday}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if mode == "off":
+        subprocess.run(["systemctl", "--user", "disable", "--now", "chatgpt-archive.timer"], capture_output=True)
+    else:
+        _write_units(mode, clock, weekday, archive)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False, capture_output=True)
+        result = subprocess.run(
+            ["systemctl", "--user", "enable", "--now", "chatgpt-archive.timer"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "could not enable systemd timer")
+    payload = schedule_payload()
+    payload["ok"] = True
+    return payload
 
 
 def conversation_path(archive: Path, conv_id: str) -> dict:
@@ -464,6 +603,11 @@ def build_parser() -> argparse.ArgumentParser:
     export_cmd.add_argument("--limit", type=int, default=150)
     export_cmd.add_argument("--full", action="store_true")
     sub.add_parser("projects")
+    sub.add_parser("schedule-get")
+    set_cmd = sub.add_parser("schedule-set")
+    set_cmd.add_argument("--mode", default="off")
+    set_cmd.add_argument("--time", default="09:00")
+    set_cmd.add_argument("--weekday", default="mon")
     return parser
 
 
@@ -494,6 +638,10 @@ def main(argv: list[str] | None = None) -> int:
             return emit(chatgpt_live.list_projects())
         if args.command == "export":
             return emit(live_export(archive, args.project, args.since, args.until, not args.full, args.limit))
+        if args.command == "schedule-get":
+            return emit(schedule_payload())
+        if args.command == "schedule-set":
+            return emit(schedule_set(archive, args.mode, args.time, args.weekday))
         return emit({"ok": False, "error": "unknown command"})
     except chatgpt_live.LiveError as error:
         return emit({"ok": False, "error": str(error)})
