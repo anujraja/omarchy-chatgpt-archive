@@ -1,6 +1,16 @@
 # ChatGPT Archive
 
-Omarchy app for a local ChatGPT conversation archive. Open it from the bar, export with a project and date range, or import an official ZIP.
+An Omarchy bar plugin for a local ChatGPT archive. Click the zip icon on the right of the bar to open a panel next to it — the same pattern as clock and audio.
+
+Live shots from this machine, including chats from the **Omarchy-Test** project.
+
+![Panel attached to the bar](docs/screenshots/panel.jpg)
+
+![Empty desktop with the bar icon](docs/screenshots/desktop.jpg)
+
+![Download progress](docs/screenshots/progress.jpg)
+
+![Settings — daily and weekly schedule](docs/screenshots/settings.jpg)
 
 ## Install
 
@@ -8,27 +18,41 @@ Omarchy app for a local ChatGPT conversation archive. Open it from the bar, expo
 omarchy plugin add https://github.com/anujraja/omarchy-chatgpt-archive.git --enable
 ```
 
-A compact zip icon sits on the right of the bar. Click it to open a panel attached to the button, like the clock or audio popups.
+If the zip icon is not on the bar yet:
 
-- Left click — open the panel
-- Middle click — start export
-- Right click — open the archive folder
+```bash
+omarchy plugin enable io.github.anujraja.chatgpt-archive right
+```
 
-If you are not signed in, the icon is a login glyph. After ChatGPT login it becomes the archive box.
+Reload the shell after an update:
 
-## Export from the bar
+```bash
+omarchy plugin update io.github.anujraja.chatgpt-archive
+omarchy restart shell
+```
 
-1. Click the icon. If there is no session, press **Log in to ChatGPT**.
-2. Sign in in the ChatGPT window that opens. The app fetches the session in the background — no token paste.
-3. Choose a project and date range, then **Export**.
+## Use
 
-Matching threads are written as Markdown under `~/.local/share/chatgpt-archive`. A progress bar shows listing and download as they happen. Incremental skips conversations that have not changed. The session is stored only in `~/.config/chatgpt-archive/config.env` (mode 600) and is never passed as a command-line flag.
+- **Left click** — open the panel under the icon
+- **Middle click** — start an export
+- **Right click** — open `~/.local/share/chatgpt-archive`
 
-## Schedule
+If you are not signed in, the panel shows **Log in to ChatGPT**. That opens ChatGPT in a browser window; the plugin reads the session in the background. No token paste.
 
-Open the panel → **Settings**. Choose Off, Daily, or Weekly, set a time, and save. Omarchy uses a systemd user timer on this machine (`chatgpt-archive.timer`) so exports keep running while you are logged in.
+Then pick a **project** (for example Omarchy-Test) and a **date range**, search, and **Export chats**. A progress bar tracks listing and download. Incremental mode skips chats that have not changed.
 
-You can still import ChatGPT’s official ZIP from **Settings → Data controls → Export data**.
+You can also import the official ZIP from ChatGPT **Settings → Data controls → Export data**.
+
+## Settings
+
+Open the panel → **Settings**:
+
+- Schedule **Off**, **Daily**, or **Weekly**
+- Time (`HH:MM`) and weekday for weekly runs
+- **Save schedule** — installs a systemd user timer (`chatgpt-archive.timer`)
+- **Open archive folder**
+
+Scheduled exports use the same local session as the bar and run while you are logged in.
 
 ## Remove
 
@@ -36,7 +60,28 @@ You can still import ChatGPT’s official ZIP from **Settings → Data controls 
 omarchy plugin remove io.github.anujraja.chatgpt-archive
 ```
 
-Removal does not delete the archive folder or the saved session file.
+This does not delete the archive folder, the saved session, or the timer. To drop the timer as well:
+
+```bash
+systemctl --user disable --now chatgpt-archive.timer
+```
+
+## Privacy
+
+- Session is stored only in `~/.config/chatgpt-archive/config.env` (mode `600`)
+- Never passed as a command-line flag
+- No extra packages; Python 3 from Omarchy is enough
+- Plugins run unsandboxed, like every Omarchy plugin
+
+## Marketplace
+
+Plugin id: `io.github.anujraja.chatgpt-archive`  
+License: MIT  
+Kind: `bar-widget`  
+Category: Productivity  
+Tags: `bar`, `quickshell`
+
+Submit from [plugins.omarchy.org/publish.html](https://plugins.omarchy.org/publish.html) with this repository URL.
 
 ## License
 

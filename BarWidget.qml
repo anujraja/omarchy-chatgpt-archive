@@ -57,6 +57,7 @@ BarWidget {
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
     function exportNow(): void { root.open(); if (panelLoader.item) panelLoader.item.startExport() }
+    function settings(): void { root.open(); if (panelLoader.item) panelLoader.item.page = "settings" }
   }
 
   BarIconButton {

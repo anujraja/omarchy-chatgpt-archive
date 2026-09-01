@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.anujraja.chatgpt-archive",
   "name": "ChatGPT Archive",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "author": "Anuj Raja",
   "license": "MIT",
   "description": "Bar panel to log in to ChatGPT, export chats with progress, and schedule daily or weekly archives.",

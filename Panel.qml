@@ -23,7 +23,7 @@ Panel {
   property string statusText: "ChatGPT Archive"
   property string filterText: ""
   property string projectId: ""
-  property string datePreset: "30d"
+  property string datePreset: "all"
   property string exportMode: "incremental"
   property string scheduleMode: "off"
   property string scheduleTime: "09:00"
@@ -133,6 +133,7 @@ Panel {
       root.startLogin()
       return
     }
+    root.page = "archive"
     root.exporting = true
     root.busy = true
     root.progressDone = 0
@@ -224,6 +225,13 @@ Panel {
       root.statusText = payload.ok ? "Schedule saved" : (payload.error || "Could not save schedule")
       root.loadSchedule()
     }
+  }
+
+  Timer {
+    id: searchDebounce
+    interval: 180
+    repeat: false
+    onTriggered: root.refresh()
   }
 
   Timer {
@@ -379,6 +387,12 @@ Panel {
             accent: Color.accent
             onClicked: root.saveSchedule()
           }
+          Button {
+            text: "Open archive folder"
+            bordered: true
+            foreground: root.foreground
+            onClicked: Quickshell.execDetached(["bash", "-lc", "mkdir -p " + JSON.stringify(root.archiveDir) + " && xdg-open " + JSON.stringify(root.archiveDir)])
+          }
         }
 
         Column {
@@ -426,6 +440,16 @@ Panel {
             foreground: root.foreground
             onChanged: function(value) { root.datePreset = value; root.refresh() }
           }
+          TextField {
+            width: parent.width
+            placeholderText: "Search chats"
+            text: root.filterText
+            foreground: root.foreground
+            onTextChanged: {
+              root.filterText = text
+              searchDebounce.restart()
+            }
+          }
           Button {
             text: root.exporting ? "Downloading…" : "Export chats"
             active: true
@@ -465,7 +489,15 @@ Panel {
                 }
                 Text {
                   width: parent.width
-                  text: String(modelData.updated || "").slice(0, 10)
+                  text: {
+                    var projectName = ""
+                    for (var i = 0; i < root.projects.length; i++) {
+                      if (String(root.projects[i].id || "") === String(modelData.project || ""))
+                        projectName = String(root.projects[i].name || "")
+                    }
+                    var date = String(modelData.updated || "").slice(0, 10)
+                    return projectName ? (projectName + " · " + date) : date
+                  }
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
