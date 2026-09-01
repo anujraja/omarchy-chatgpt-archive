@@ -168,11 +168,21 @@ Panel {
     return ""
   }
 
+  function filePath(item) {
+    var rel = String((item && item.markdown) || "")
+    if (!rel) return ""
+    if (rel.charAt(0) === "/") return rel
+    return root.archiveDir + "/" + rel
+  }
+
   function openSelected() {
     if (root.selectedIndex < 0 || root.selectedIndex >= root.conversations.length) return
     var item = root.conversations[root.selectedIndex]
-    if (!item || !item.markdown) return
-    Quickshell.execDetached(["xdg-open", root.archiveDir + "/" + item.markdown])
+    var path = root.filePath(item)
+    if (!path) return
+    root.statusText = "opening " + String(item.title || "chat") + ".md"
+    Quickshell.execDetached(["omarchy", "launch", "editor", path])
+    root.close()
   }
 
   function openConversation(index) {
@@ -519,6 +529,7 @@ Panel {
               HoverHandler { id: hover }
 
               MouseArea {
+                z: 2
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 cursorShape: Qt.PointingHandCursor
