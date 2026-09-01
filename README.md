@@ -6,8 +6,6 @@ Live shots from this desktop, including chats from the **Omarchy-Test** project.
 
 ![Panel attached to the bar](docs/screenshots/panel.jpg)
 
-![Empty desktop with the bar icon](docs/screenshots/desktop.jpg)
-
 ![Download progress](docs/screenshots/progress.jpg)
 
 ![Settings — daily and weekly schedule](docs/screenshots/settings.jpg)
